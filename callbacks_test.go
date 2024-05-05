@@ -1,6 +1,7 @@
 package zapparser
 
 import (
+	"log"
 	"path/filepath"
 	"testing"
 	"time"
@@ -90,6 +91,7 @@ func TestParser_OnEntry(t *testing.T) {
 
 	count := 0
 	p.OnEntry(func(e *Entry) {
+		log.Println(e)
 		count++
 	})
 	p.Start()

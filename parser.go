@@ -24,6 +24,7 @@ type Entry struct {
 
 // Parser holds the zap logs parser
 type Parser struct {
+	TimeIsNonUnix   bool
 	currentLine     uint64
 	onClose         []func()
 	onEntry         []func(*Entry)
@@ -34,6 +35,13 @@ type Parser struct {
 	stackCollecting []byte
 }
 
+type logLineNonUnix struct {
+	Level   string                 `json:"level"`
+	Time    string                 `json:"ts"`
+	Caller  string                 `json:"caller,omitempty"`
+	Message string                 `json:"msg"`
+	Extras  map[string]interface{} `json:"-"`
+}
 type logLine struct {
 	Level   string                 `json:"level"`
 	UnixTS  float64                `json:"ts"`
@@ -59,7 +67,11 @@ func (p *Parser) Start() {
 		if atomic.LoadUint32(p.running) == 0 {
 			break
 		}
-		p.parseLine(p.scanner.Text())
+		if p.TimeIsNonUnix {
+			p.parseLineNonUnix(p.scanner.Text())
+		} else {
+			p.parseLine(p.scanner.Text())
+		}
 		p.currentLine++
 	}
 	if err := p.scanner.Err(); err != nil {
@@ -74,19 +86,42 @@ func (p *Parser) Start() {
 func (p *Parser) Stop() {
 	atomic.StoreUint32(p.running, 0)
 }
-
+func (p *Parser) parseLineNonUnix(line string) {
+	var e logLineNonUnix
+	if err := json.Unmarshal([]byte(line), &e); err != nil {
+		p.sendError(errors.Annotate(err, fmt.Sprintf("json parsing on line %d failed", p.currentLine)))
+		return
+	}
+	if err := json.Unmarshal([]byte(line), &e.Extras); err != nil {
+		p.sendError(errors.Annotate(err, fmt.Sprintf("json parsing on line %d failed", p.currentLine)))
+		return
+	}
+	t, err := time.Parse("2006-01-02T15:04:05.999Z", e.Time)
+	if err != nil {
+		p.sendError(errors.Annotate(err, fmt.Sprintf("time parsing on line %d failed", p.currentLine)))
+		return
+	}
+	p.parseSecond(&logLine{
+		Level:   e.Level,
+		UnixTS:  float64(t.UnixNano() / 1e9),
+		Caller:  e.Caller,
+		Message: e.Message,
+		Extras:  e.Extras,
+	})
+}
 func (p *Parser) parseLine(line string) {
-
 	var e logLine
 	if err := json.Unmarshal([]byte(line), &e); err != nil {
 		p.sendError(errors.Annotate(err, fmt.Sprintf("json parsing on line %d failed", p.currentLine)))
 		return
 	}
-
 	if err := json.Unmarshal([]byte(line), &e.Extras); err != nil {
 		p.sendError(errors.Annotate(err, fmt.Sprintf("json parsing on line %d failed", p.currentLine)))
 		return
 	}
+	p.parseSecond(&e)
+}
+func (p *Parser) parseSecond(e *logLine) {
 
 	delete(e.Extras, "level")
 	delete(e.Extras, "caller")
@@ -133,8 +168,8 @@ func (p *Parser) parseLine(line string) {
 	for _, c := range p.onEntry {
 		c(entry)
 	}
-}
 
+}
 func (p *Parser) sendError(err error) {
 	for _, c := range p.onError {
 		c(err)
